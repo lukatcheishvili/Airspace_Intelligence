@@ -86,7 +86,7 @@ OpenSky Network API
 | Credential | Value |
 |-----------|-------|
 | MinIO Access Key | `airspace-intel` |
-| MinIO Secret Key | `Airspace2026Stream!` |
+| MinIO Secret Key | `Confidential` |
 | MinIO S3 Endpoint | `http://127.0.0.1:9000` |
 | MinIO Web Console | `http://127.0.0.1:9001` |
 | Bronze Bucket | `airspace-intelligence-bronze` |
@@ -209,7 +209,7 @@ Writes the FlowFile to the MinIO Bronze bucket using the S3 protocol.
 | Object Key | `opensky/bronze/${now():format('yyyy-MM-dd')}/${now():format('HH')}/opensky_${now():format('yyyyMMdd_HHmmss_SSS')}.json` |
 | Region | `us-east-1` |
 | Access Key ID | `airspace-intel` |
-| Secret Access Key | `Airspace2026Stream!` |
+| Secret Access Key | `Confidential!` |
 | Endpoint Override URL | `http://127.0.0.1:9000` |
 | Use Path Style Access | `True` |
 | SSL Context Service | *(leave empty — HTTP not HTTPS)* |
@@ -258,7 +258,7 @@ spark = (SparkSession.builder
             "com.amazonaws:aws-java-sdk-bundle:1.12.262")
     .config("spark.hadoop.fs.s3a.endpoint",       "http://127.0.0.1:9000")
     .config("spark.hadoop.fs.s3a.access.key",     "airspace-intel")
-    .config("spark.hadoop.fs.s3a.secret.key",     "Airspace2026Stream!")
+    .config("spark.hadoop.fs.s3a.secret.key",     "Confidential!")
     .config("spark.hadoop.fs.s3a.path.style.access", "true")
     .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
     .getOrCreate())
