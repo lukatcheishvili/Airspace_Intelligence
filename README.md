@@ -6,13 +6,13 @@
 
 ## Group 4 Members
 
-| # | Name |
-|---|------|
-| 1 | Rincon Juan José |
-| 2 | Gelin Romain |
-| 3 | Gaitan Diego |
-| 4 | Tcheishvili Luka |
-| 5 | Tambey Cécile |
+| # | Name | Role |
+|---|------|------|
+| 1 | Rincon Juan José
+| 2 | Gelin Romain
+| 3 | Gaitan Diego
+| 4 | Tcheishvili Luka
+| 5 | Tambey Cécile
 
 ---
 
@@ -31,15 +31,16 @@
 
 ## 1. Project Overview
 
-Airspace Intelligence is a real-time Big Data pipeline that continuously ingests live aircraft telemetry from the **OpenSky Network API**, stores raw JSON snapshots in **MinIO** object storage, and performs three analytical use cases using **Apache Spark**.
+Airspace Intelligence is a real-time Big Data pipeline that continuously ingests live aircraft telemetry from the **OpenSky Network API**, stores raw JSON snapshots in **MinIO** object storage, and performs analytical use cases using **Apache Spark**.
 
 | Field | Detail |
 |-------|--------|
-| Monitored Region | Iberian Peninsula (lat 35.5–44.5°N, lon -10.0–4.5°E) |
+| Monitored Region | Iberian Peninsula (lat 36.4–43.2°N, lon -10.0–2.5°E) |
 | Ingestion Frequency | Every 10 seconds |
 | Data Source | OpenSky Network REST API |
-| Spark Features Used | Structured Streaming · SQL · ML (KMeans) |
+| Spark Features Used | SQL · MLlib (BisectingKMeans, RandomForestClassifier) · Folium |
 | Submission Deadline | March 19th, 2026 via Blackboard |
+| GitHub | https://github.com/lukatcheishvili/Airspace_Intelligence.git |
 
 ---
 
@@ -50,7 +51,7 @@ OpenSky Network API
         │
         ▼  (HTTP GET every 10 sec)
 ┌──────────────────┐
-│   Apache NiFi    │  GenerateFlowFile → InvokeHTTP → PutS3Object
+│   Apache NiFi    │  GenerateFlowFile → InvokeHTTP → LogAttribute → PutS3Object
 └──────────────────┘
         │
         ▼  (JSON snapshots ~49 KB each)
@@ -64,16 +65,25 @@ OpenSky Network API
 ┌──────────────────────────────────────────────┐
 │  Apache Spark (PySpark) — Jupyter Notebook   │
 │                                              │
-│  UC1: Structured Streaming — Density         │
-│  UC2: Spark SQL — Country / Airline Traffic  │
-│  UC3: Spark ML KMeans — Congestion Detection │
+│  Part I  — Descriptive Analysis              │
+│    · Traffic by Country & Airline (SQL)      │
+│    · Airspace Density Heatmap (Folium)       │
+│                                              │
+│  Part II — Corridor Clustering               │
+│    · Flight Segmentation & Feature Eng.      │
+│    · BisectingKMeans Corridor Discovery      │
+│    · Deviation Labelling                     │
+│                                              │
+│  Part III — Corridor Deviation Classifier    │
+│    · RandomForest Classifier                 │
+│    · Real-time corridor prediction           │
 └──────────────────────────────────────────────┘
         │
         ▼
 ┌───────────────────────┐
 │  Visualisations       │
 │  Seaborn · Matplotlib │
-│  Folium (HTML map)    │
+│  Folium (HTML maps)   │
 └───────────────────────┘
 ```
 
@@ -83,16 +93,30 @@ OpenSky Network API
 
 > **For team members and professor only. Do not share publicly.**
 
+Credentials are loaded from a `.env` file (never committed to GitHub). A `.env.example` template is provided in the repository.
+
 | Credential | Value |
 |-----------|-------|
 | MinIO Access Key | `airspace-intel` |
-| MinIO Secret Key | `Confidential` |
+| MinIO Secret Key | `Confidential!` |
 | MinIO S3 Endpoint | `http://127.0.0.1:9000` |
 | MinIO Web Console | `http://127.0.0.1:9001` |
 | Bronze Bucket | `airspace-intelligence-bronze` |
 | Spark Bronze Path | `s3a://airspace-intelligence-bronze/opensky/bronze/` |
 | OpenSky API | `https://opensky-network.org/api/states/all` |
 | Bounding Box | `lamin=35.5 lomin=-10.0 lamax=44.5 lomax=4.5` |
+
+### Security — .env setup
+
+Create a `.env` file in the project root (never commit it):
+
+```
+MINIO_ACCESS_KEY=airspace-intel
+MINIO_SECRET_KEY=Confidential!
+MINIO_ENDPOINT=http://127.0.0.1:9000
+```
+
+Ensure `.gitignore` contains: `.env`
 
 ---
 
@@ -105,7 +129,7 @@ minio server --address :9000 --console-address :9001 /data/s3
 ```
 
 | Flag | Purpose |
-|------|---------|
+|------|---------| 
 | `--address :9000` | S3 API port — used by NiFi and Spark |
 | `--console-address :9001` | Web UI port — open in browser to manage buckets |
 | `/data/s3` | Physical directory where all bucket data is stored |
@@ -127,26 +151,6 @@ Then open `http://127.0.0.1:9001` in a browser and log in with the credentials a
 4. Leave all other settings as default — Access will show as **PRIVATE** (this is correct)
 5. Click **Create Bucket**
 
-After ingestion begins, bucket details will match:
-
-| Field | Expected Value |
-|-------|---------------|
-| Bucket Name | `airspace-intelligence-bronze` |
-| Access | `PRIVATE` |
-| File path | `opensky/bronze/YYYY-MM-DD/HH/opensky_YYYYMMDD_HHmmss_SSS.json` |
-| File size per snapshot | ~49.2 – 50.0 KiB |
-| Total after 67 snapshots | ~3.1 MiB · 67 objects |
-
-### 4.4 Validate Data Arrival (after NiFi is running)
-
-Navigate to `airspace-intelligence-bronze/opensky/bronze/YYYY-MM-DD/HH/` — you should see `.json` files (~49–50 KB each) named like:
-
-```
-opensky_20260312_183050_123.json
-```
-
-> **Note:** Files are stored in dated subfolders. This is why Spark requires `recursiveFileLookup=true` when reading.
-
 ---
 
 ## 5. Apache NiFi Pipeline
@@ -155,54 +159,36 @@ opensky_20260312_183050_123.json
 
 > Start MinIO **before** starting NiFi. There are **4 processors** in the pipeline.
 
-### 5.1 Create Process Group
+### 5.1 Processor 1 — GenerateFlowFile
 
-1. Open NiFi UI (typically `http://127.0.0.1:8080/nifi`)
-2. Drag a **Process Group** onto the canvas
-3. Name it: `airspace-intelligence`
-4. Double-click to enter the group
-
----
-
-### 5.2 Processor 1 — GenerateFlowFile
-
-Triggers the pipeline on a 10-second schedule by producing an empty FlowFile.
-
-**SCHEDULING tab:**
 | Setting | Value |
 |---------|-------|
 | Run Schedule | `10 sec` |
-
-**PROPERTIES tab:**
-| Property | Value |
-|----------|-------|
 | File Size | `0 b` |
 | Batch Size | `1` |
 
----
+### 5.2 Processor 2 — InvokeHTTP
 
-### 5.3 Processor 2 — InvokeHTTP
-
-Makes the HTTP GET request to the OpenSky API and returns the JSON as FlowFile content.
-
-**PROPERTIES tab:**
 | Property | Value |
 |----------|-------|
 | HTTP Method | `GET` |
 | Remote URL | `https://opensky-network.org/api/states/all?lamin=35.5&lomin=-10.0&lamax=44.5&lomax=4.5` |
 | Connection Timeout | `10 sec` |
 | Read Timeout | `30 sec` |
-| Follow Redirects | `True` |
 
-**RELATIONSHIPS tab:** Auto-terminate `Failure`, `No Retry`, `Original`, `Retry`. Connect only `Response` to the next processor.
+Connect `Response` relationship to LogAttribute. Auto-terminate all others.
 
----
+### 5.3 Processor 3 — LogAttribute
 
-### 5.4 Processor 3 — PutS3Object
+| Property | Value |
+|----------|-------|
+| Log Level | `info` |
+| Log Payload | `false` |
 
-Writes the FlowFile to the MinIO Bronze bucket using the S3 protocol.
+Connect `success` relationship to PutS3Object.
 
-**PROPERTIES tab:**
+### 5.4 Processor 4 — PutS3Object
+
 | Property | Value |
 |----------|-------|
 | Bucket | `airspace-intelligence-bronze` |
@@ -212,56 +198,27 @@ Writes the FlowFile to the MinIO Bronze bucket using the S3 protocol.
 | Secret Access Key | `Confidential!` |
 | Endpoint Override URL | `http://127.0.0.1:9000` |
 | Use Path Style Access | `True` |
-| SSL Context Service | *(leave empty — HTTP not HTTPS)* |
-
-**RELATIONSHIPS tab:** Auto-terminate `Failure` and `Success`.
-
-> The Object Key uses NiFi Expression Language to auto-create date/hour folder hierarchy.
-
----
-
-### 5.5 Processor 3 — LogAttribute
-
-Logs FlowFile attributes between InvokeHTTP and PutS3Object for debugging and monitoring.
-
-**PROPERTIES tab:**
-| Property | Value |
-|----------|-------|
-| Log Level | `info` |
-| Log Payload | `false` |
-
-**RELATIONSHIPS:** Connect `success` to PutS3Object.
-
----
-
-### 5.6 Connect and Start
-
-1. **GenerateFlowFile** → `success` → **InvokeHTTP**
-2. **InvokeHTTP** → `Response` → **LogAttribute**
-3. **LogAttribute** → `success` → **PutS3Object**
-4. Auto-terminate all unused relationships on each processor
-5. Right-click canvas → **Select All** → click **Start**
-4. All processors should turn green
-5. After 60 seconds, verify files appear in MinIO console
 
 ---
 
 ## 6. Jupyter Notebook — Spark Analysis
 
-### 6.1 Key Spark Configuration
+### 6.1 SparkSession Configuration
+
+The S3A connector is configured at runtime via `_jsc.hadoopConfiguration()` — credentials are loaded from environment variables:
 
 ```python
-spark = (SparkSession.builder
-    .appName("AirspaceIntelligence")
-    .config("spark.jars.packages",
-            "org.apache.hadoop:hadoop-aws:3.3.4,"
-            "com.amazonaws:aws-java-sdk-bundle:1.12.262")
-    .config("spark.hadoop.fs.s3a.endpoint",       "http://127.0.0.1:9000")
-    .config("spark.hadoop.fs.s3a.access.key",     "airspace-intel")
-    .config("spark.hadoop.fs.s3a.secret.key",     "Confidential!")
-    .config("spark.hadoop.fs.s3a.path.style.access", "true")
-    .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
-    .getOrCreate())
+MINIO_ENDPOINT   = os.getenv('MINIO_ENDPOINT')
+MINIO_ACCESS_KEY = os.getenv('MINIO_ACCESS_KEY')
+MINIO_SECRET_KEY = os.getenv('MINIO_SECRET_KEY')
+
+spark = SparkSession.builder.appName('AirspaceIntelligence').getOrCreate()
+
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.endpoint",          MINIO_ENDPOINT)
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.access.key",        MINIO_ACCESS_KEY)
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.secret.key",        MINIO_SECRET_KEY)
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.path.style.access", "true")
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.s3a.impl",              "org.apache.hadoop.fs.s3a.S3AFileSystem")
 ```
 
 ### 6.2 Critical Data Load Pattern
@@ -270,144 +227,185 @@ spark = (SparkSession.builder
 raw_df = (
     spark.read
     .schema(opensky_schema)
-    .option("multiLine", True)
-    .option("recursiveFileLookup", "true")   # REQUIRED — files are in subfolders
+    .option('multiLine', True)
+    .option('recursiveFileLookup', 'true')   # REQUIRED — files are in dated subfolders
     .json(BRONZE_PATH)
 )
 ```
 
-### 6.3 Use Case 1 — Structured Streaming (Density Monitoring)
+### 6.3 Bounding Box Filter
 
-- Reads Bronze path as a **stream**
-- Applies a **1-minute tumbling window** on snapshot timestamp
-- Uses `approx_count_distinct` (not `countDistinct` — exact distinct is unsupported in streaming)
-- Sinks to memory table `density_stream`, runs for 25 seconds
-
-### 6.4 Use Case 2 — Spark SQL (Country & Airline Traffic)
-
-- Registers DataFrame as temp view: `aircraft_df.createOrReplaceTempView('aircraft')`
-- SQL query for top-20 countries by unique aircraft
-- Airline code extracted with regex: first 3 uppercase alpha characters of callsign
-- Speed converted: `avg_velocity_ms * 3.6` → km/h
-
-### 6.5 Use Case 3 — Spark ML KMeans (Congestion Detection)
+The notebook filters aircraft to a **tighter bounding box** around the Iberian Peninsula after loading:
 
 ```python
-from pyspark.ml.clustering import KMeans
-from pyspark.ml.feature import VectorAssembler
-
-assembler = VectorAssembler(inputCols=["lat_cell", "lon_cell", "avg_aircraft"],
-                             outputCol="features")
-kmeans = KMeans(k=3, seed=42, featuresCol="features", predictionCol="density_cluster")
+aircraft_df = aircraft_df
+    .filter(F.col("latitude").between(36.4, 43.2))
+    .filter(F.col("longitude").between(-10.0, 2.5))
 ```
 
-- Grid cells labeled **Low / Medium / High Density** by mean aircraft count per cluster
-- Silhouette score evaluated with `ClusteringEvaluator`
+### 6.4 Part I — Descriptive Analysis
+
+**Traffic by Country & Airline (Spark SQL)**
+
+- Registers `aircraft_df` as a SQL view: `aircraft_df.createOrReplaceTempView('aircraft')`
+- Top-20 countries by unique aircraft with average speed and altitude
+- Airline code extracted from first 3 uppercase characters of callsign
+- Market share % per country computed against total unique aircraft
+
+**Airspace Density Heatmap (Folium)**
+
+- 1°×1° grid cells (upgraded from 2°×2°)
+- `log1p` transform applied to aircraft counts to reduce visual skew from hotspots
+- Interactive `HeatMap` layer on CartoDB dark_matter tiles
+- Cyan grid rectangles drawn for spatial reference
+
+### 6.5 Part II — Corridor Clustering Analysis
+
+**Flight Segmentation**
+
+- Each `icao24` track is split into continuous flight segments by detecting gaps > 30 minutes between consecutive position updates
+- Each segment receives a unique `flight_id` = `{icao24}_{date}_{seg_id}`
+- Segments with fewer than 8 snapshots are discarded
+
+**Airport Proximity UDFs**
+
+Three PySpark UDFs are defined using the Haversine formula and reference airports:
+
+| Airport | ICAO | Location |
+|---------|------|----------|
+| Madrid Barajas | LEMD | 40.47°N, 3.56°W |
+| Barcelona El Prat | LEBL | 41.30°N, 2.08°E |
+| Lisbon | LPPT | 38.78°N, 9.14°W |
+| Porto | LPPR | 41.25°N, 8.68°W |
+| Seville | LEZL | 37.42°N, 5.89°W |
+| Valencia | LEVC | 39.49°N, 0.48°W |
+| Malaga | LEMG | 36.67°N, 4.50°W |
+| Alicante | LEAL | 38.28°N, 0.56°W |
+| Bilbao | LEBB | 43.30°N, 2.91°W |
+| Palma de Mallorca | LEPA | 39.55°N, 2.74°E |
+
+**Flight Type Classification**
+
+| Type | Rule |
+|------|------|
+| `departure` | Start near airport, end NOT near airport |
+| `arrival` | Start NOT near airport, end near airport |
+| `hop` | Both endpoints near an airport — **excluded from clustering** |
+| `pass_through` | Neither endpoint near an airport |
+
+**Trajectory Resampling**
+
+Each trajectory is resampled to exactly `N_WAYPOINTS = 15` equally-spaced lat/lon waypoints using linear interpolation, producing a fixed-length 30-dimensional feature vector suitable for ML clustering.
+
+**BisectingKMeans Corridor Clustering**
+
+```python
+km = BisectingKMeans(
+    featuresCol='traj_vec', predictionCol='cluster',
+    k=k, seed=42, maxIter=30, minDivisibleClusterSize=5.0
+)
+```
+
+| Flight Type | k (clusters) |
+|-------------|-------------|
+| `pass_through` | 8 |
+| `arrival` | 5 |
+| `departure` | 5 |
+
+Pipeline: `VectorAssembler → StandardScaler → BisectingKMeans`
+
+Corridor IDs are assigned based on detected departure/arrival airports (e.g. `LEMD-ARR-2`, `PT-5`).
+
+### 6.6 Part III — Corridor Deviation Classifier (Random Forest)
+
+**Train/Test Split — by flight, not by row**
+
+```python
+unique_flights = labelled_points.select("flight_id").distinct()
+train_flights, test_flights = unique_flights.randomSplit([0.8, 0.2], seed=42)
+```
+
+> Splitting by `flight_id` prevents data leakage — all snapshots from a given flight stay in one partition.
+
+**Feature Columns**
+
+| Feature | Description |
+|---------|-------------|
+| `latitude` | Current position latitude |
+| `longitude` | Current position longitude |
+| `track_sin` | Sine of true_track (circular encoding) |
+| `track_cos` | Cosine of true_track (circular encoding) |
+| `vrate_clamped` | Vertical rate clamped to [-30, +30] m/s |
+
+**ML Pipeline**
+
+```
+StringIndexer → VectorAssembler → StandardScaler → RandomForestClassifier → IndexToString
+```
+
+RandomForest configuration: `numTrees=100`, `maxDepth=8`, `featureSubsetStrategy='sqrt'`
+
+**Deviation Flag**
+
+Each prediction is tagged with a status based on the model's max class probability:
+
+| Status | Condition |
+|--------|-----------|
+| `on_corridor` | max_probability ≥ 0.70 |
+| `marginal` | max_probability ≥ 0.45 |
+| `deviating` | max_probability < 0.45 |
 
 ---
 
 ## 7. Insights & Results
 
-> Run date: March 12, 2026 | 67 snapshots | ~10 minutes of ingestion
+### 7.1 Traffic by Country & Airline
 
-### 7.1 Use Case 1 — Airspace Density
+| Country | Unique A/C | Market Share | Avg Speed (km/h) |
+|---------|-----------|-------------|-----------------|
+| Spain | **141** | **26.4%** | 569 |
+| Ireland | 57 | 10.7% | 779 |
+| France | 52 | 9.7% | 602 |
+| United Kingdom | 39 | 7.3% | 765 |
+| Portugal | 38 | 7.1% | 527 |
+| Morocco | 17 | 3.2% | **821** |
 
-| Metric | Value |
-|--------|-------|
-| Total aircraft records | **23,579** |
-| Valid snapshots | **60** of 67 raw files |
-| Average aircraft / snapshot | **352.8** |
-| Peak aircraft count | **375** (18:29 UTC) |
-| Unique aircraft (hour 18) | **535** distinct ICAO24 codes |
-| Average velocity | **183.7 m/s** |
-| Average altitude | **7,527 m** (~24,700 ft) |
+Top airline: **Ryanair (RYR)** — 83–91 unique aircraft, nearly double its nearest competitor.
 
-**Key finding:** The airspace turned over 535 unique aircraft in one hour despite averaging only 352 at any one moment — confirming the Iberian Peninsula is a high-throughput transit corridor, not just a destination.
+### 7.2 Congestion & Density
 
----
+- Highest density corridor: **NE→SW across central Spain** aligned with the main European Airway Route Network
+- Secondary cluster: **Catalonian coast** (Barcelona FIR boundary)
+- Atlantic approach lanes to Lisbon/Porto visible along the Portuguese coast (38–42°N)
 
-### 7.2 Use Case 2 — Country & Airline Traffic
+### 7.3 Corridor Clustering
 
-**Top countries by unique aircraft:**
-
-| Country | Unique A/C | Market Share | Avg Speed (km/h) | Avg Alt (m) |
-|---------|-----------|-------------|-----------------|------------|
-| Spain | **141** | **26.4%** | 569 | 5,404 |
-| Ireland | 57 | 10.7% | 779 | 9,548 |
-| France | 52 | 9.7% | 602 | 7,076 |
-| United Kingdom | 39 | 7.3% | 765 | 9,685 |
-| Portugal | 38 | 7.1% | 527 | 5,182 |
-| Morocco | 17 | 3.2% | **821** | **10,705** |
-
-**Key findings:**
-- **Spain dominates at 26.4%** — driven by dense domestic short-haul operations. Spanish aircraft fly at only 5,404 m average, consistent with approach/departure phases.
-- **Ireland at 10.7%** is disproportionately high for a country geographically distant from Iberia — this is Ryanair's registration country. The airline alone accounts for **83 unique aircraft**, nearly double its nearest competitor.
-- **Morocco flies fastest (821 km/h) and highest (10,705 m)** — these are transatlantic overflights at cruising altitude, not Iberian domestic traffic.
-- **Spain and Portugal fly 200+ km/h slower** than all other nations — clear signal of short-haul, low-altitude operations.
-
-**Top airlines:**
-
-| Code | Airline | Unique A/C | Avg Speed (km/h) |
-|------|---------|-----------|-----------------|
-| RYR | Ryanair | **83** | 756 |
-| VLG | Vueling | 47 | 649 |
-| EJU | easyJet Europe | 27 | 738 |
-| TAP | TAP Air Portugal | 21 | 671 |
-| ANE | Air Nostrum | 21 | 569 |
-| RAM | Royal Air Maroc | 12 | **858** |
-
----
-
-### 7.3 Use Case 3 — Congestion Detection
-
-| Metric | Value |
-|--------|-------|
-| Grid resolution | 2×2 degree cells |
-| Congestion threshold | ≥5 aircraft per cell |
-| Total cell-snapshot observations | **2,410** |
-| Congested observations | **1,512 (62.7%)** |
-| KMeans silhouette score | **0.4687** |
-| High Density cells | 4 cells · avg **28.5** aircraft |
-| Medium Density cells | 15 cells · avg **11.0** aircraft |
-| Low Density cells | 26 cells · avg **3.1** aircraft |
-
-**Top 5 persistent congestion hotspots** (congested in all 60 snapshots):
-
-| Cell | Lat | Lon | Avg Aircraft | Peak |
-|------|-----|-----|-------------|------|
-| LAT40_LON-4 | 40.0°N | 4.0°W | **37.2** | **44** |
-| LAT38_LON-10 | 38.0°N | 10.0°W | 26.4 | 29 |
-| LAT40_LON2 | 40.0°N | 2.0°E | 26.9 | 30 |
-| LAT36_LON-6 | 36.0°N | 6.0°W | 23.4 | 27 |
-| LAT38_LON-6 | 38.0°N | 6.0°W | 11.9 | 14 |
-
-**Key findings:**
-- **62.7% overall congestion rate** — the majority of Iberian airspace exceeds the 5-aircraft threshold at any given moment, meaning congestion is structural, not episodic.
-- **LAT40_LON-4 (central Spain / Madrid FIR)** is the single most congested cell at 37.2 average aircraft and a peak of 44 — directly over one of Europe's busiest air traffic control zones.
-- **LAT38_LON-10 (Atlantic entry point)** is persistently congested at 26.4 average — this cell captures transatlantic inbound/outbound traffic funneling through the Iberian gateway.
-- **All 30 hotspot cells were congested in every single snapshot** — this is structural, predictable congestion that could support real-time ATC load-balancing decisions.
-- **Silhouette score 0.4687** indicates meaningful but not perfect cluster separation — acceptable for geographic grid clustering where spatial autocorrelation naturally limits within-cluster variance.
+- BisectingKMeans identified distinct **arrival, departure, and overfly corridors** consistent with known Iberian geography
+- **Entry/exit position** and **heading (true_track)** are the most discriminating features for corridor membership
+- The Random Forest reliably predicts corridor membership from instantaneous aircraft state
 
 ---
 
 ## 8. Conclusions
 
-1. **Full pipeline validated end-to-end:** NiFi → MinIO → Spark → visualisation running stably on a local OSBDET environment.
-2. **Three distinct Spark capabilities exercised:** Structured Streaming, SQL, and ML — meeting all course requirements.
-3. **Iberian airspace is structurally congested:** 62.7% congestion rate across all cells confirms this is baseline behaviour, not a peak-hour anomaly.
-4. **Low-cost carrier dominance is visible in raw telemetry:** Ryanair alone represents ~15% of all unique aircraft detected.
-5. **Two-tier altitude/speed structure:** Long-haul transit (Morocco, UK, Ireland) vs. short-haul domestic (Spain, Portugal) creates clearly separable flight profiles that KMeans captures.
+1. Full pipeline validated end-to-end: NiFi → MinIO → Spark → visualisation
+2. Three distinct Spark ML capabilities exercised: BisectingKMeans, RandomForest, Spark SQL
+3. Spain holds ~25.6% of airspace; Ryanair is the single largest operator
+4. Two-tier speed structure confirmed: long-haul transit vs. short-haul domestic
+5. Corridor clustering successfully partitions Iberian airspace into operationally meaningful zones
+6. The Random Forest deviation classifier provides a foundation for real-time ATC alerting
 
 ---
 
 ## 9. Future Work
 
-- **24-hour ingestion** to capture full daily traffic cycles and morning vs. evening peak comparison
+- **24-hour ingestion** to expose full daily traffic cycles and morning vs. evening peak patterns
 - **Silver layer** Spark transformations to enrich data with nearest-airport lookup
 - **Gold layer** persistence using Apache Cassandra or PostgreSQL for live dashboard serving
-- **GraphFrames** (Spark Graph Processing) to model airport-to-airport routes as a directed graph — hub connectivity analysis
+- **Weather & NOTAM integration** to reduce false positive deviation alerts from legitimate re-routing
+- **Finer 0.25° spatial grid** for better resolution near major airports
 - **Apache Superset** dashboard connected to Gold layer for real-time operational monitoring
-- **Anomaly detection** using Spark ML Isolation Forest on velocity/altitude deviations to flag unusual flight behaviour
+- **Anomaly detection** using Spark ML Isolation Forest on velocity/altitude deviations
 
 ---
 
